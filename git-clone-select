@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+#
+
+from __future__ import print_function
+import os
+import sys
+import subprocess
+import io
+import re
+import argparse
+
+# url='simplex.giss.nasa.gov:/giss/gitrepo/modelE.git'
+
+
+parser = argparse.ArgumentParser(description='Clone a git repository, but only for certain branches and depth.')
+parser.add_argument('url', action='store',
+	help='URL of the git repo being cloned.')
+parser.add_argument('branches', nargs='*', default=['master', '.*'],
+	help='Regular expressions of branches to fetch.  The first one specified will be checked out.')
+parser.add_argument('--depth', type=int, action='store', default=argparse.SUPPRESS,
+	help='Depth for git fetch')
+parser.add_argument('--dest', default=argparse.SUPPRESS,
+	help='Directory to clone into.  If ends in slash, place into that directory; otherwise, place into subdirectory named after the URL')
+
+args = parser.parse_args()
+
+# ------ Determine destination directory
+destRE = re.compile('.*/(.*?).git')
+repo_name = destRE.match(args.url).group(1)
+
+if 'dest' in args:
+	dest = args.dest
+	if dest[-1] == '/':
+		dest = os.path.join(dest[:-1], repo_name)
+else:
+	dest = os.path.join('.', repo_name)
+
+
+# Check the destination directory
+if os.path.exists(dest):
+	if not os.path.isdir(dest):
+		sys.stderr.write("Fatal: destination path '{}' already exists and is not a directory.".format(dest))
+		sys.exit(1)
+	if len(os.listdir(dest)) > 0:
+		sys.stderr.write("Fatal: destination path '{}' already exists and is not an empty directory.".format(dest))
+		sys.exit(1)
+
+
+# ------ List the branches on the remote server
+# And select only those that match our branch regexp
+cmd = ['git', 'ls-remote', args.url]
+output = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()[0]
+
+headRE = re.compile('.*?\s+refs/heads/(.*?)\s+')
+remote_branches = list()
+for line in io.StringIO(output.decode()):
+	match = headRE.match(line)
+	if match:
+		branch = match.group(1)
+		remote_branches.append(match.group(1))
+
+remote_branches.sort()
+
+# ------ Construct the regular expression used to evaluate branches
+branchRE = list()
+for branch in args.branches:
+	branchRE.append(branch)
+branchRE = re.compile('^(' + '|'.join(branchRE) + r')$')
+
+# ------- Figure out which of those branches we want
+checkout_branch = None
+fetch_branches = list()
+for branch in remote_branches:
+	match2 = branchRE.match(branch)
+	if match2:
+		if match2.group(1) and checkout_branch is None:
+			checkout_branch = branch
+		fetch_branches.append(branch)
+
+if len(fetch_branches) == 0:
+	sys.stderr.write('No branches to fetch!\n')
+	sys.exit(0)
+if checkout_branch is None:
+	checkout_branch = fetch_branches[0]
+	sys.stderr.write('No matching checkout branch; will check out {} instead.\n'.format(checkout_branch))
+
+# --------- Fetch them
+if not os.path.exists(dest):
+	os.makedirs(dest)
+
+cmd = ['git', 'init']
+subprocess.Popen(cmd, cwd=dest).wait()
+
+cmd = ['git', 'remote', 'add']
+for branch in fetch_branches:
+	cmd.append('-t')
+	cmd.append(branch)
+cmd += ['origin', args.url]
+subprocess.Popen(cmd, cwd=dest).wait()
+
+cmd = ['git', 'fetch']
+if 'depth' in args:
+	cmd += ['--depth', str(args.depth)]
+subprocess.Popen(cmd, cwd=dest).wait()
+
+cmd = ['git', 'checkout', checkout_branch]
+subprocess.Popen(cmd, cwd=dest).wait()
